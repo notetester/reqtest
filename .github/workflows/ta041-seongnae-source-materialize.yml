@@ -1,0 +1,35 @@
+name: TA-041 exact Seongnae source materialize
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  materialize:
+    if: github.head_ref == 'ta041-seongnae-source-materialize'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify exact public source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          curl --fail --location --retry 3 \
+            --output 'work/4-1. 배치도 및 평면도(서울성내초).dwg' \
+            'https://edu-design.sen.go.kr/rest/file/49209'
+          test "$(stat -c '%s' 'work/4-1. 배치도 및 평면도(서울성내초).dwg')" = '1466909'
+          test "$(head -c 6 'work/4-1. 배치도 및 평면도(서울성내초).dwg')" = 'AC1032'
+          echo 'dab3babe4100cb4a330e2dda44ba43caa20456786a5893510b04f81157935535  work/4-1. 배치도 및 평면도(서울성내초).dwg' | sha256sum --check --strict
+      - name: Upload exact source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ta041-seongnae-exact-source
+          path: work/4-1. 배치도 및 평면도(서울성내초).dwg
+          if-no-files-found: error
+          retention-days: 1
