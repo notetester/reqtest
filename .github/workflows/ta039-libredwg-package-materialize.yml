@@ -15,43 +15,102 @@ jobs:
     steps:
       - name: Download exact npm package
         shell: bash
+        env:
+          npm_config_registry: https://registry.npmjs.org/
+          npm_config_ignore_scripts: "true"
+          npm_config_audit: "false"
+          npm_config_fund: "false"
+          npm_config_update_notifier: "false"
         run: |
           set -euo pipefail
-          mkdir -p work/package-root
-          cd work
-          npm pack --silent @mlightcad/libredwg-web@0.7.9
-          tarball="$(find . -maxdepth 1 -name '*.tgz' -print -quit)"
-          test -n "$tarball"
-          tar -xzf "$tarball" -C package-root
-          cp "$tarball" package-root/
+          mkdir -p work/pack work/package-root
+          npm pack @mlightcad/libredwg-web@0.7.9 \
+            --json \
+            --ignore-scripts \
+            --registry https://registry.npmjs.org/ \
+            --pack-destination work/pack > work/pack-result.json
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const result = JSON.parse(fs.readFileSync('work/pack-result.json', 'utf8'));
+          if (!Array.isArray(result) || result.length !== 1) throw new Error('npm pack result count drift');
+          const entry = result[0];
+          if (entry.name !== '@mlightcad/libredwg-web' || entry.version !== '0.7.9') throw new Error('npm identity drift');
+          if (!/^sha512-/.test(entry.integrity || '')) throw new Error('missing npm integrity');
+          if (!/^[0-9a-f]{40}$/i.test(entry.shasum || '')) throw new Error('missing npm shasum');
+          const source = path.join('work', 'pack', entry.filename);
+          if (!fs.statSync(source).isFile()) throw new Error(`tarball missing: ${source}`);
+          fs.copyFileSync(source, path.join('work', 'package-root', entry.filename));
+          fs.writeFileSync('work/package-root/npm-pack-result.json', `${JSON.stringify(result, null, 2)}\n`);
+          fs.writeFileSync('work/package-root/npm-registry.txt', 'https://registry.npmjs.org/\n');
+          NODE
+          tarball="$(find work/pack -maxdepth 1 -name '*.tgz' -print -quit)"
+          tar -tzf "$tarball" > work/package-root/archive-paths.txt
+          tar -tvzf "$tarball" > work/package-root/archive-types.txt
+          tar -xzf "$tarball" -C work/package-root
 
-      - name: Verify package contract and record hashes
+      - name: Verify acquisition and package contract
         shell: bash
         run: |
           set -euo pipefail
           node <<'NODE'
+          const crypto = require('crypto');
           const fs = require('fs');
           const path = require('path');
+          const pack = JSON.parse(fs.readFileSync('work/package-root/npm-pack-result.json', 'utf8'))[0];
+          const tarPath = path.join('work', 'package-root', pack.filename);
+          const bytes = fs.readFileSync(tarPath);
+          const sha1 = crypto.createHash('sha1').update(bytes).digest('hex');
+          const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+          const integrity = `sha512-${crypto.createHash('sha512').update(bytes).digest('base64')}`;
+          if (sha1.toLowerCase() !== pack.shasum.toLowerCase()) throw new Error('npm shasum mismatch');
+          if (integrity !== pack.integrity) throw new Error('npm integrity mismatch');
+          const paths = fs.readFileSync('work/package-root/archive-paths.txt', 'utf8').split(/\r?\n/).filter(Boolean);
+          const required = new Set(['package/package.json','package/dist/libredwg-web.js','package/wasm/libredwg-web.js','package/wasm/libredwg-web.wasm']);
+          for (const raw of paths) {
+            const entry = raw.replace(/^\.\//, '').replace(/\/$/, '');
+            if (entry.startsWith('/') || entry.split('/').includes('..') || !entry.startsWith('package')) throw new Error(`unsafe archive path: ${raw}`);
+            required.delete(entry);
+          }
+          if (required.size) throw new Error(`missing archive paths: ${[...required].join(',')}`);
+          const types = fs.readFileSync('work/package-root/archive-types.txt', 'utf8').split(/\r?\n/).filter(Boolean);
+          for (const line of types) if (!['-','d'].includes(line[0])) throw new Error(`unsafe archive type: ${line}`);
           const root = path.resolve('work/package-root/package');
           const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
           const expected = { name: '@mlightcad/libredwg-web', version: '0.7.9', license: 'GPL-3.0' };
-          for (const [key, value] of Object.entries(expected)) {
-            if (pkg[key] !== value) throw new Error(`${key} mismatch: ${pkg[key]}`);
-          }
-          for (const relative of ['dist/libredwg-web.js', 'wasm/libredwg-web.js', 'wasm/libredwg-web.wasm']) {
+          for (const [key, value] of Object.entries(expected)) if (pkg[key] !== value) throw new Error(`${key} mismatch: ${pkg[key]}`);
+          for (const relative of ['dist/libredwg-web.js','wasm/libredwg-web.js','wasm/libredwg-web.wasm']) {
             const file = path.join(root, relative);
             if (!fs.statSync(file).isFile() || fs.statSync(file).size === 0) throw new Error(`missing ${relative}`);
           }
+          const acquisition = {
+            mode: 'npm_pack_exact_version',
+            package_spec: '@mlightcad/libredwg-web@0.7.9',
+            npm_registry: 'https://registry.npmjs.org/',
+            npm_filename: pack.filename,
+            npm_integrity: pack.integrity,
+            npm_shasum: pack.shasum.toLowerCase(),
+            archive_size_bytes: bytes.byteLength,
+            archive_sha1: sha1,
+            archive_sha256: sha256,
+            lifecycle_scripts_disabled: true,
+            archive_paths_validated: true,
+            archive_entry_types_validated: true
+          };
+          fs.writeFileSync('work/package-root/package-acquisition.json', `${JSON.stringify(acquisition, null, 2)}\n`);
+          console.log('TA039_NPM_SHASUM_VALIDATION=PASS');
+          console.log('TA039_NPM_INTEGRITY_VALIDATION=PASS');
+          console.log('TA039_ARCHIVE_PATH_VALIDATION=PASS');
+          console.log('TA039_ARCHIVE_TYPE_VALIDATION=PASS');
           console.log('TA039_PACKAGE_CONTRACT=PASS');
           NODE
           cd work/package-root
           find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
-          cat SHA256SUMS.txt
 
       - name: Upload exact package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ta039-libredwg-web-0.7.9
+          name: ta039-libredwg-web-0.7.9-canonical
           path: work/package-root/
           if-no-files-found: error
           retention-days: 1
