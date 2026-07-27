@@ -1,0 +1,58 @@
+name: TA-039 LibreDWG package materialization
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download exact npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/package-root
+          cd work
+          npm pack --silent @mlightcad/libredwg-web@0.7.9
+          tarball="$(find . -maxdepth 1 -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+          tar -xzf "$tarball" -C package-root
+          cp "$tarball" package-root/
+
+      - name: Verify package contract and record hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const root = path.resolve('work/package-root/package');
+          const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+          const expected = { name: '@mlightcad/libredwg-web', version: '0.7.9', license: 'GPL-3.0' };
+          for (const [key, value] of Object.entries(expected)) {
+            if (pkg[key] !== value) throw new Error(`${key} mismatch: ${pkg[key]}`);
+          }
+          for (const relative of ['dist/libredwg-web.js', 'wasm/libredwg-web.js', 'wasm/libredwg-web.wasm']) {
+            const file = path.join(root, relative);
+            if (!fs.statSync(file).isFile() || fs.statSync(file).size === 0) throw new Error(`missing ${relative}`);
+          }
+          console.log('TA039_PACKAGE_CONTRACT=PASS');
+          NODE
+          cd work/package-root
+          find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload exact package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ta039-libredwg-web-0.7.9
+          path: work/package-root/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
